@@ -1,0 +1,53 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+-dev
+- main
+variables:
+- ${{ if eq9variables[ 'Build.SourceBranchName'], 'dev'}} :
+  - group: Dev-Group
+- ${{if eq(variavles['Build.SourceBranch'], 'main')}} : 
+  - group: Prod-Group
+
+stages: 
+- stage: Build
+  jobs:
+  -job: Build
+  steps: 
+  - task: MSBuild@1
+    inputs:
+      soulution: '**/*.sqlproj'
+  - task: CopyFiles@2
+    inputs:
+    SourceFolder: '$(Build.SourcesDirctorv)\gold_temp\bin\Debug'
+    Contents:'**'
+    TargetFolder: '$(Build.ArtifactStagingDirecory)'
+ 
+  -task: PublishBuildArtifact@1
+    input: 
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    ArtifactName: 'drop'
+  publishLocation: 'Container'
+
+  -stage: Deploy
+  dependOn: Build
+  jobs:
+  - job: Deploy
+  steps:
+  -download: current
+   artifact: drop
+-task: SqlDacpacDeploymentOnMachineGroup@0
+inputs:
+  TaskType: 'dacpac'
+  DacpacFile: '$(Pipeline.Workspace)\drop\gold_temp.dacpac'
+  TargetMethod: 'server'
+  ServerName: '$(sql_server_name)'
+  DatabaseName: '$(sql-datbase_name)'
+  AuthScheme: 'sqlServerAuthentication'
+  SqlUsername: '$(sqluser)'
+  SqlPassword: '$(sqlpass)'
+  PublishProfile: '$(publish_profile_path)'
+
