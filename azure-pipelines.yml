@@ -4,50 +4,97 @@
 # https://aka.ms/yaml
 
 trigger:
--dev
-- main
+  branches:
+    include:
+      - dev
+      - main
+
 variables:
-- ${{ if eq9variables[ 'Build.SourceBranchName'], 'dev'}} :
-  - group: Dev-Group
-- ${{if eq(variavles['Build.SourceBranch'], 'main')}} : 
-  - group: Prod-Group
+  BuildConfiguration: Release
 
-stages: 
+stages:
+
+# ========== BUILD ==========
 - stage: Build
-  jobs:
-  -job: Build
-  steps: 
-  - task: MSBuild@1
-    inputs:
-      soulution: '**/*.sqlproj'
-  - task: CopyFiles@2
-    inputs:
-    SourceFolder: '$(Build.SourcesDirctorv)\gold_temp\bin\Debug'
-    Contents:'**'
-    TargetFolder: '$(Build.ArtifactStagingDirecory)'
- 
-  -task: PublishBuildArtifact@1
-    input: 
-    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-    ArtifactName: 'drop'
-  publishLocation: 'Container'
+  displayName: Build DACPAC
+  pool:
+    vmImage: 'windows-latest'
 
-  -stage: Deploy
-  dependOn: Build
   jobs:
-  - job: Deploy
-  steps:
-  -download: current
-   artifact: drop
--task: SqlDacpacDeploymentOnMachineGroup@0
-inputs:
-  TaskType: 'dacpac'
-  DacpacFile: '$(Pipeline.Workspace)\drop\gold_temp.dacpac'
-  TargetMethod: 'server'
-  ServerName: '$(sql_server_name)'
-  DatabaseName: '$(sql-datbase_name)'
-  AuthScheme: 'sqlServerAuthentication'
-  SqlUsername: '$(sqluser)'
-  SqlPassword: '$(sqlpass)'
-  PublishProfile: '$(publish_profile_path)'
+  - job: Build
+    steps:
 
+    - task: VSBuild@1
+      displayName: Build SSDT solution
+      inputs:
+        solution: '**/gold_temp.sln'
+        vsVersion: '17.0'
+        configuration: '$(BuildConfiguration)'
+
+    - task: CopyFiles@2
+      displayName: Copy DACPAC
+      inputs:
+        SourceFolder: '$(Build.SourcesDirectory)/gold_temp/bin/$(BuildConfiguration)'
+        Contents: '**/*.dacpac'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/gold_temp'
+
+    - task: PublishBuildArtifacts@1
+      displayName: Publish DACPAC artifact
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/gold_temp'
+        ArtifactName: 'gold_temp'
+        publishLocation: 'Container'
+
+# ========== DEV ==========
+- stage: Deploy_Dev
+  displayName: Deploy to DEV
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'dev'))
+  variables:
+    - group: Dev-Group
+
+  jobs:
+  - job: DeployDev
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+
+    - download: current
+      artifact: gold_temp
+
+    - task: SqlAzureDacpacDeployment@1
+      displayName: Deploy DACPAC to DEV
+      inputs:
+        dacpacFile: '$(Pipeline.Workspace)/gold_temp/gold_temp.dacpac'
+        serverName: '$(DEV_SQL_SERVER)'
+        databaseName: '$(DEV_DB_NAME)'
+        authType: 'sqlServerAuthentication'
+        sqlUsername: '$(DEV_DB_USER)'
+        sqlPassword: '$(DEV_DB_PASSWORD)'
+
+# ========== PROD ==========
+- stage: Deploy_Prod
+  displayName: Deploy to PROD
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
+  variables:
+    - group: Prod_Group
+
+  jobs:
+  - job: DeployProd
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+
+    - download: current
+      artifact: gold_temp
+
+    - task: SqlAzureDacpacDeployment@1
+      displayName: Deploy DACPAC to PROD
+      inputs:
+        dacpacFile: '$(Pipeline.Workspace)/gold_temp/gold_temp.dacpac'
+        serverName: '$(PROD_SQL_SERVER)'
+        databaseName: '$(PROD_DB_NAME)'
+        authType: 'sqlServerAuthentication'
+        sqlUsername: '$(PROD_DB_USER)'
+        sqlPassword: '$(PROD_DB_PASSWORD)'
