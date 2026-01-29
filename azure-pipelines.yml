@@ -3,98 +3,179 @@
 # Add steps that build, run tests, deploy, and more:
 # https://aka.ms/yaml
 
-trigger:
-  branches:
-    include:
-      - dev
-      - main
 
-variables:
-  BuildConfiguration: Release
+trigger:
+
+- main
+
+
+
+pool:
+
+  name: Default
+
+
 
 stages:
 
-# ========== BUILD ==========
+# -------------------- BUILD --------------------
+
 - stage: Build
+
   displayName: Build DACPAC
-  pool:
-    vmImage: 'windows-latest'
 
   jobs:
+
   - job: Build
+
     steps:
 
-    - task: VSBuild@1
-      displayName: Build SSDT solution
+    - checkout: self
+
+      persistCredentials: true
+
+      clean: true
+
+
+
+    # 用 sqlproj 来 build，避免找不到 sln
+
+    - task: MSBuild@1
+
+      displayName: Build SSDT sqlproj
+
       inputs:
-        solution: '**/gold_temp.sln'
-        vsVersion: '17.0'
-        configuration: '$(BuildConfiguration)'
+
+        solution: '**/*.sqlproj'
+
+        msbuildArguments: '/p:Configuration=Debug'
+
+
+
+    # 把 dacpac 收集进 artifact
 
     - task: CopyFiles@2
-      displayName: Copy DACPAC
+
+      displayName: Copy dacpac to staging
+
       inputs:
-        SourceFolder: '$(Build.SourcesDirectory)/gold_temp/bin/$(BuildConfiguration)'
+
+        SourceFolder: '$(Build.SourcesDirectory)'
+
         Contents: '**/*.dacpac'
-        TargetFolder: '$(Build.ArtifactStagingDirectory)/gold_temp'
+
+        TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+
 
     - task: PublishBuildArtifacts@1
-      displayName: Publish DACPAC artifact
+
+      displayName: Publish artifact
+
       inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)/gold_temp'
-        ArtifactName: 'gold_temp'
+
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+
+        ArtifactName: 'drop'
+
         publishLocation: 'Container'
 
-# ========== DEV ==========
-- stage: Deploy_Dev
+
+
+
+
+# -------------------- DEPLOY DEV --------------------
+
+- stage: Deploy_DEV
+
   displayName: Deploy to DEV
+
   dependsOn: Build
-  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'dev'))
+
   variables:
-    - group: Dev-Group
+
+  - group: Dev-Group   # 这里名字要和 Library 完全一致
 
   jobs:
-  - job: DeployDev
-    pool:
-      vmImage: 'windows-latest'
+
+  - job: DeployDEV
+
     steps:
 
     - download: current
-      artifact: gold_temp
 
-    - task: SqlAzureDacpacDeployment@1
+      artifact: drop
+
+
+
+    - task: SqlDacpacDeploymentOnMachineGroup@0
+
       displayName: Deploy DACPAC to DEV
-      inputs:
-        dacpacFile: '$(Pipeline.Workspace)/gold_temp/gold_temp.dacpac'
-        serverName: '$(DEV_SQL_SERVER)'
-        databaseName: '$(DEV_DB_NAME)'
-        authType: 'sqlServerAuthentication'
-        sqlUsername: '$(DEV_DB_USER)'
-        sqlPassword: '$(DEV_DB_PASSWORD)'
 
-# ========== PROD ==========
-- stage: Deploy_Prod
+      inputs:
+
+        TaskType: 'dacpac'
+
+        DacpacFile: '$(Pipeline.Workspace)/drop/**/gold_tempo.dacpac'
+
+        TargetMethod: 'server'
+
+        ServerName: '$(DEV_SQL_SERVER)'
+
+        DatabaseName: '$(DEV_DB_NAME)'
+
+        AuthScheme: 'sqlServerAuthentication'
+
+        SqlUsername: '$(DEV_DB_USER)'
+
+        SqlPassword: '$(DEV_DB_PASSWORD)'
+
+
+
+
+
+# -------------------- DEPLOY PROD --------------------
+
+- stage: Deploy_PROD
+
   displayName: Deploy to PROD
+
   dependsOn: Build
-  condition: and(succeeded(), eq(variables['Build.SourceBranchName'], 'main'))
+
   variables:
-    - group: Prod_Group
+
+  - group: Prod_Group  # 这里也要完全一致
 
   jobs:
-  - job: DeployProd
-    pool:
-      vmImage: 'windows-latest'
+
+  - job: DeployPROD
+
     steps:
 
     - download: current
-      artifact: gold_temp
 
-    - task: SqlAzureDacpacDeployment@1
+      artifact: drop
+
+
+
+    - task: SqlDacpacDeploymentOnMachineGroup@0
+
       displayName: Deploy DACPAC to PROD
+
       inputs:
-        dacpacFile: '$(Pipeline.Workspace)/gold_temp/gold_temp.dacpac'
-        serverName: '$(PROD_SQL_SERVER)'
-        databaseName: '$(PROD_DB_NAME)'
-        authType: 'sqlServerAuthentication'
-        sqlUsername: '$(PROD_DB_USER)'
-        sqlPassword: '$(PROD_DB_PASSWORD)'
+
+        TaskType: 'dacpac'
+
+        DacpacFile: '$(Pipeline.Workspace)/drop/**/gold_tempo.dacpac'
+
+        TargetMethod: 'server'
+
+        ServerName: '$(PROD_SQL_SERVER)'
+
+        DatabaseName: '$(PROD_DB_NAME)'   # 你这里在 Prod_Group 里填 gold_copy
+
+        AuthScheme: 'sqlServerAuthentication'
+
+        SqlUsername: '$(PROD_DB_USER)'
+
+        SqlPassword: '$(PROD_DB_PASSWORD)'
