@@ -38,8 +38,7 @@ stages:
 
 
 
-    - script: dir $(Build.SourcesDirectory) /s
-      displayName: "List all files"
+    
 
 
     - task: MSBuild@1
