@@ -46,7 +46,8 @@ stages:
 
       inputs:
 
-        solution: 'src/Database/MyDatabase.sqlproj'
+        solution: 'src/**/Database*.sqlproj'
+
 
 
         msbuildArguments: '/p:Configuration=Debug'
