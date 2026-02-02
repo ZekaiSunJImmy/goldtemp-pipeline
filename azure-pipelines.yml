@@ -38,7 +38,9 @@ stages:
 
 
 
-    # 用 sqlproj 来 build，避免找不到 sln
+    - script: dir $(Build.SourcesDirectory) /s
+      displayName: "List all files"
+
 
     - task: MSBuild@1
 
@@ -52,7 +54,7 @@ stages:
 
 
 
-    # 把 dacpac 收集进 artifact
+   
 
     - task: CopyFiles@2
 
@@ -94,7 +96,7 @@ stages:
 
   variables:
 
-  - group: Dev-Group   # 这里名字要和 Library 完全一致
+  - group: Dev-Group   
 
   jobs:
 
@@ -144,7 +146,7 @@ stages:
 
   variables:
 
-  - group: Prod_Group  # 这里也要完全一致
+  - group: Prod_Group  
 
   jobs:
 
@@ -172,7 +174,7 @@ stages:
 
         ServerName: '$(PROD_SQL_SERVER)'
 
-        DatabaseName: '$(PROD_DB_NAME)'   # 你这里在 Prod_Group 里填 gold_copy
+        DatabaseName: '$(PROD_DB_NAME)'   
 
         AuthScheme: 'sqlServerAuthentication'
 
