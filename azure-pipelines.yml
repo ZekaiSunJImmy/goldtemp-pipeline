@@ -47,7 +47,7 @@ stages:
 
       inputs:
 
-        solution: '**\gold_tempo.sln'
+        solution: '**/*.sqproj'
 
         msbuildArguments: '/p:Configuration=Debug'
 
