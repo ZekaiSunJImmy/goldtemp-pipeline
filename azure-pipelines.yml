@@ -47,7 +47,7 @@ stages:
 
       inputs:
 
-        solution: '**/*.sqlproj'
+        solution: '**\gold_tempo.sln'
 
         msbuildArguments: '/p:Configuration=Debug'
 
