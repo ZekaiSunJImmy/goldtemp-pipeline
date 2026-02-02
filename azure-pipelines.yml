@@ -47,7 +47,7 @@ stages:
 
       inputs:
 
-        solution: '**/*.sqproj'
+        solution: '**/*.sqlproj'
 
         msbuildArguments: '/p:Configuration=Debug'
 
