@@ -1,182 +1,209 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
-
-
 trigger:
-
-- main
-
-
+  branches:
+    include:
+    - main
 
 pool:
-
   name: Default
 
+variables:
+  # Full data copy target DB name
+  DEV_COPY_DB_NAME: 'gold_copy'
+  PROD_COPY_DB_NAME: 'gold_copy'
 
+  # Source DB name (the DB you want to copy FROM)
+  SOURCE_DB_NAME: 'gold_tempo'
+
+  # IMPORTANT: this path is on the SQL Server machine (not the agent).
+  # The SQL Server service account must be able to write/read here.
+  SQL_BACKUP_FILE_DEV: 'C:\SqlBackups\gold_tempo_to_gold_copy_dev.bak'
+  SQL_BACKUP_FILE_PROD: 'C:\SqlBackups\gold_tempo_to_gold_copy_prod.bak'
 
 stages:
-
-# -------------------- BUILD --------------------
-
+# =========================
+# BUILD
+# =========================
 - stage: Build
-
   displayName: Build DACPAC
-
   jobs:
-
   - job: Build
-
+    displayName: Build
     steps:
-
     - checkout: self
-
       persistCredentials: true
-
       clean: true
 
-
-
-    
-
+    # Debug helper: confirm the sqlproj exists and show its path in logs
+    - powershell: |
+        Write-Host "Build.SourcesDirectory = $(Build.SourcesDirectory)"
+        $projs = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter *.sqlproj
+        if (-not $projs) {
+          Write-Error "No .sqlproj found under $(Build.SourcesDirectory). Check repo/branch/path."
+          exit 1
+        }
+        "Found sqlproj files:"
+        $projs | ForEach-Object { $_.FullName }
+      displayName: "Find sqlproj"
 
     - task: MSBuild@1
-
       displayName: Build SSDT sqlproj
-
       inputs:
-
         solution: '**/*.sqlproj'
-
-        msbuildArguments: '/p:Configuration=Debug'
-
-
-
-   
+        msbuildArchitecture: 'x64'
+        configuration: 'Debug'
 
     - task: CopyFiles@2
-
       displayName: Copy dacpac to staging
-
       inputs:
-
         SourceFolder: '$(Build.SourcesDirectory)'
-
         Contents: '**/*.dacpac'
-
         TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
-
-
     - task: PublishBuildArtifacts@1
-
       displayName: Publish artifact
-
       inputs:
-
         PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-
         ArtifactName: 'drop'
-
         publishLocation: 'Container'
 
-
-
-
-
-# -------------------- DEPLOY DEV --------------------
-
+# =========================
+# DEPLOY DEV (DACPAC)
+# =========================
 - stage: Deploy_DEV
-
   displayName: Deploy to DEV
-
   dependsOn: Build
-
   variables:
-
-  - group: Dev-Group   
-
+  - group: Dev-Group
   jobs:
-
   - job: DeployDEV
-
+    displayName: Deploy DEV
     steps:
-
     - download: current
-
       artifact: drop
 
-
-
     - task: SqlDacpacDeploymentOnMachineGroup@0
-
       displayName: Deploy DACPAC to DEV
-
       inputs:
-
         TaskType: 'dacpac'
-
         DacpacFile: '$(Pipeline.Workspace)/drop/**/gold_tempo.dacpac'
-
         TargetMethod: 'server'
-
         ServerName: '$(DEV_SQL_SERVER)'
-
         DatabaseName: '$(DEV_DB_NAME)'
-
         AuthScheme: 'sqlServerAuthentication'
-
         SqlUsername: '$(DEV_DB_USER)'
-
         SqlPassword: '$(DEV_DB_PASSWORD)'
 
-
-
-
-
-# -------------------- DEPLOY PROD --------------------
-
-- stage: Deploy_PROD
-
-  displayName: Deploy to PROD
-
-  dependsOn: Build
-
+# =========================
+# FULL DATA COPY DEV
+# gold_tempo -> gold_copy
+# =========================
+- stage: Copy_DEV
+  displayName: Full data copy DEV (gold_tempo -> gold_copy)
+  dependsOn: Deploy_DEV
   variables:
-
-  - group: Prod_Group  
-
+  - group: Dev-Group
   jobs:
-
-  - job: DeployPROD
-
+  - job: CopyDEV
+    displayName: Backup/Restore DEV
     steps:
+    - powershell: |
+        $server = "$(DEV_SQL_SERVER)"
+        $user   = "$(DEV_DB_USER)"
+        $pass   = "$(DEV_DB_PASSWORD)"
 
+        $srcDb  = "$(SOURCE_DB_NAME)"
+        $dstDb  = "$(DEV_COPY_DB_NAME)"
+        $bak    = "$(SQL_BACKUP_FILE_DEV)"
+
+        $tsql = @"
+        -- If destination exists, force single-user so we can restore over it
+        IF DB_ID(N'$dstDb') IS NOT NULL
+        BEGIN
+          ALTER DATABASE [$dstDb] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+        END
+
+        -- Backup source database
+        BACKUP DATABASE [$srcDb]
+          TO DISK = N'$bak'
+          WITH COPY_ONLY, INIT, COMPRESSION, STATS = 10;
+
+        -- Restore into destination (schema + data)
+        RESTORE DATABASE [$dstDb]
+          FROM DISK = N'$bak'
+          WITH REPLACE, RECOVERY, STATS = 10;
+
+        -- Back to multi-user
+        ALTER DATABASE [$dstDb] SET MULTI_USER;
+        "@
+
+        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 120 -d master
+      displayName: Full copy DEV (backup/restore)
+
+# =========================
+# DEPLOY PROD (DACPAC)
+# =========================
+- stage: Deploy_PROD
+  displayName: Deploy to PROD
+  dependsOn: Build
+  variables:
+  - group: Prod_Group
+  jobs:
+  - job: DeployPROD
+    displayName: Deploy PROD
+    steps:
     - download: current
-
       artifact: drop
 
-
-
     - task: SqlDacpacDeploymentOnMachineGroup@0
-
       displayName: Deploy DACPAC to PROD
-
       inputs:
-
         TaskType: 'dacpac'
-
         DacpacFile: '$(Pipeline.Workspace)/drop/**/gold_tempo.dacpac'
-
         TargetMethod: 'server'
-
         ServerName: '$(PROD_SQL_SERVER)'
-
-        DatabaseName: '$(PROD_DB_NAME)'   
-
+        DatabaseName: '$(PROD_DB_NAME)'
         AuthScheme: 'sqlServerAuthentication'
-
         SqlUsername: '$(PROD_DB_USER)'
-
         SqlPassword: '$(PROD_DB_PASSWORD)'
+
+# =========================
+# FULL DATA COPY PROD
+# gold_tempo -> gold_copy
+# =========================
+- stage: Copy_PROD
+  displayName: Full data copy PROD (gold_tempo -> gold_copy)
+  dependsOn: Deploy_PROD
+  variables:
+  - group: Prod_Group
+  jobs:
+  - job: CopyPROD
+    displayName: Backup/Restore PROD
+    steps:
+    - powershell: |
+        $server = "$(PROD_SQL_SERVER)"
+        $user   = "$(PROD_DB_USER)"
+        $pass   = "$(PROD_DB_PASSWORD)"
+
+        $srcDb  = "$(SOURCE_DB_NAME)"
+        $dstDb  = "$(PROD_COPY_DB_NAME)"
+        $bak    = "$(SQL_BACKUP_FILE_PROD)"
+
+        $tsql = @"
+        IF DB_ID(N'$dstDb') IS NOT NULL
+        BEGIN
+          ALTER DATABASE [$dstDb] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+        END
+
+        BACKUP DATABASE [$srcDb]
+          TO DISK = N'$bak'
+          WITH COPY_ONLY, INIT, COMPRESSION, STATS = 10;
+
+        RESTORE DATABASE [$dstDb]
+          FROM DISK = N'$bak'
+          WITH REPLACE, RECOVERY, STATS = 10;
+
+        ALTER DATABASE [$dstDb] SET MULTI_USER;
+        "@
+
+        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 120 -d master
+      displayName: Full copy PROD (backup/restore)
