@@ -1,77 +1,58 @@
 trigger:
-  branches:
-    include:
-    - main
+- main
 
 pool:
   name: Default
 
 variables:
-  # Source DB (DEV) and destination DB (PROD)
-  DEV_SOURCE_DB_NAME: 'gold_tempo'
-  PROD_TARGET_DB_NAME: 'gold_copy'
-
-  # IMPORTANT:
-  # This path must be reachable by BOTH SQL Servers (DEV and PROD), because:
-  # 1) DEV will BACKUP to this path
-  # 2) PROD will RESTORE from this same path
-  #
-  # Best practice: a shared UNC path like \\fileserver\sqlbackups\...
-  # (SQL Server service accounts on both sides must have read/write permissions)
-  SHARED_BACKUP_FILE: '\\fileserver\sqlbackups\gold_tempo_dev_to_gold_copy_prod.bak'
+- group: dbt_lina
+- name: DEV_SOURCE_DB
+  value: 'gold_tempo'
+- name: PROD_TARGET_DB
+  value: 'gold_copy'
+- name: SHARED_BACKUP_FILE
+  value: '\\BLC-FILE01\SqlBackups\gold_tempo_dev_to_gold_copy_prod.bak'
 
 stages:
 # =========================
-# BUILD (DACPAC)
+# BUILD
 # =========================
 - stage: Build
-  displayName: Build DACPAC
+  displayName: 'Build Database (gold_tempo)'
   jobs:
   - job: Build
-    displayName: Build
     steps:
     - checkout: self
-      persistCredentials: true
       clean: true
 
-    # Optional: confirm sqlproj exists (helps avoid "Solution not found" errors)
-    - powershell: |
-        Write-Host "Build.SourcesDirectory = $(Build.SourcesDirectory)"
-        $projs = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter *.sqlproj
-        if (-not $projs) { throw "No .sqlproj found under $(Build.SourcesDirectory)" }
-        $projs | ForEach-Object { $_.FullName }
-      displayName: "Find sqlproj"
-
-    - task: MSBuild@1
-      displayName: Build SSDT sqlproj
+    # Build (keep VSBuild since your working example uses .sln)
+    - task: VSBuild@1
+      displayName: 'Visual Studio Build'
       inputs:
-        solution: '**/*.sqlproj'
-        msbuildArchitecture: 'x64'
-        configuration: 'Debug'
+        solution: '**\gold_tempo.sln'
+        vsVersion: '17.0'
 
+    # Publish the dacpac
     - task: CopyFiles@2
-      displayName: Copy dacpac to staging
+      displayName: 'Copy into artifacts folder'
       inputs:
-        SourceFolder: '$(Build.SourcesDirectory)'
+        SourceFolder: '$(Build.Repository.LocalPath)\gold_tempo\bin\Debug'
         Contents: '**/*.dacpac'
         TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
     - task: PublishBuildArtifacts@1
-      displayName: Publish artifact
+      displayName: 'Publish artifact'
       inputs:
         PathtoPublish: '$(Build.ArtifactStagingDirectory)'
         ArtifactName: 'drop'
         publishLocation: 'Container'
 
 # =========================
-# DEPLOY DEV (optional)
-# Keep if you still want to deploy schema changes to DEV.
+# DEPLOY DEV (gold_tempo)
 # =========================
 - stage: Deploy_DEV
-  displayName: Deploy to DEV
+  displayName: 'Deploy DEV gold_tempo'
   dependsOn: Build
-  variables:
-  - group: Dev-Group
   jobs:
   - job: DeployDEV
     steps:
@@ -79,35 +60,34 @@ stages:
       artifact: drop
 
     - task: SqlDacpacDeploymentOnMachineGroup@0
-      displayName: Deploy DACPAC to DEV
+      displayName: 'Deploy DACPAC to DEV gold_tempo'
       inputs:
         TaskType: 'dacpac'
-        DacpacFile: '$(Pipeline.Workspace)/drop/**/gold_tempo.dacpac'
+        DacpacFile: '$(Pipeline.Workspace)\drop\gold_tempo.dacpac'
         TargetMethod: 'server'
-        ServerName: '$(DEV_SQL_SERVER)'
-        DatabaseName: '$(DEV_DB_NAME)'
+        ServerName: 'BLC-SVR-DW-DEV'
+        DatabaseName: 'gold_tempo'
         AuthScheme: 'sqlServerAuthentication'
-        SqlUsername: '$(DEV_DB_USER)'
-        SqlPassword: '$(DEV_DB_PASSWORD)'
+        SqlUsername: '$(sqluser)'
+        SqlPassword: '$(sqlpass)'
+        PublishProfile: '$(Build.Repository.LocalPath)\gold_tempo\gold_tempo.publish.xml'
 
 # =========================
-# COPY DEV -> PROD (FULL DATA COPY)
+# FULL DATA COPY: DEV -> PROD
 # gold_tempo (DEV) -> gold_copy (PROD)
 # =========================
 - stage: Copy_DEV_to_PROD
-  displayName: Full copy DEV gold_tempo -> PROD gold_copy
-  dependsOn: Deploy_DEV   # change to "Build" if you want copy even when Deploy_DEV is removed
+  displayName: 'Full copy DEV gold_tempo -> PROD gold_copy'
+  dependsOn: Deploy_DEV
   jobs:
   - job: CopyDevToProd
-    displayName: Backup on DEV, Restore on PROD
     steps:
-    # --- BACKUP on DEV server ---
+    # ---- BACKUP on DEV server (writes to shared path) ----
     - powershell: |
-        $server = "$(DEV_SQL_SERVER)"
-        $user   = "$(DEV_DB_USER)"
-        $pass   = "$(DEV_DB_PASSWORD)"
-
-        $srcDb  = "$(DEV_SOURCE_DB_NAME)"
+        $server = "BLC-SVR-DW-DEV"
+        $user   = "$(sqluser)"
+        $pass   = "$(sqlpass)"
+        $srcDb  = "$(DEV_SOURCE_DB)"
         $bak    = "$(SHARED_BACKUP_FILE)"
 
         $tsql = @"
@@ -116,16 +96,15 @@ stages:
           WITH COPY_ONLY, INIT, COMPRESSION, STATS = 10;
         "@
 
-        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 120 -d master
-      displayName: "DEV: Backup gold_tempo to shared .bak"
+        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 300 -d master
+      displayName: 'DEV: Backup gold_tempo to shared .bak'
 
-    # --- RESTORE on PROD server into gold_copy ---
+    # ---- RESTORE on PROD server into gold_copy (reads from shared path) ----
     - powershell: |
-        $server = "$(PROD_SQL_SERVER)"
-        $user   = "$(PROD_DB_USER)"
-        $pass   = "$(PROD_DB_PASSWORD)"
-
-        $dstDb  = "$(PROD_TARGET_DB_NAME)"
+        $server = "BLC-SVR-DW-PROD"
+        $user   = "$(sqluser)"
+        $pass   = "$(sqlpass)"
+        $dstDb  = "$(PROD_TARGET_DB)"
         $bak    = "$(SHARED_BACKUP_FILE)"
 
         $tsql = @"
@@ -141,32 +120,5 @@ stages:
         ALTER DATABASE [$dstDb] SET MULTI_USER;
         "@
 
-        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 300 -d master
-      displayName: "PROD: Restore shared .bak into gold_copy"
-
-# =========================
-# (Optional) Deploy PROD schema after data copy
-# If you DON'T want DACPAC to touch PROD, remove this stage entirely.
-# =========================
-- stage: Deploy_PROD
-  displayName: Deploy to PROD
-  dependsOn: Copy_DEV_to_PROD
-  variables:
-  - group: Prod_Group
-  jobs:
-  - job: DeployPROD
-    steps:
-    - download: current
-      artifact: drop
-
-    - task: SqlDacpacDeploymentOnMachineGroup@0
-      displayName: Deploy DACPAC to PROD
-      inputs:
-        TaskType: 'dacpac'
-        DacpacFile: '$(Pipeline.Workspace)/drop/**/gold_tempo.dacpac'
-        TargetMethod: 'server'
-        ServerName: '$(PROD_SQL_SERVER)'
-        DatabaseName: '$(PROD_DB_NAME)'
-        AuthScheme: 'sqlServerAuthentication'
-        SqlUsername: '$(PROD_DB_USER)'
-        SqlPassword: '$(PROD_DB_PASSWORD)'
+        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 600 -d master
+      displayName: 'PROD: Restore into gold_copy'
