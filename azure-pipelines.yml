@@ -4,32 +4,42 @@ trigger:
 pool:
   name: Default
 
-# Use the existing Library variable group that already has the right access
 variables:
 - group: Prod_Group
 
 stages:
 # =========================
-# BUILD
+# BUILD (build .sqlproj directly; no .sln needed)
 # =========================
 - stage: Build
-  displayName: 'Build Database (gold_tempo)'
+  displayName: 'Build DACPAC (gold_tempo)'
   jobs:
   - job: Build
+    displayName: Build
     steps:
     - checkout: self
       clean: true
 
-    - task: VSBuild@1
-      displayName: 'Visual Studio Build'
+    # Helpful log: show what sqlproj files exist (so you can confirm paths)
+    - powershell: |
+        Write-Host "Build.SourcesDirectory = $(Build.SourcesDirectory)"
+        $projs = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter *.sqlproj
+        if (-not $projs) { throw "No .sqlproj found under $(Build.SourcesDirectory)" }
+        "Found sqlproj:"
+        $projs | ForEach-Object { $_.FullName }
+      displayName: "Find sqlproj"
+
+    - task: MSBuild@1
+      displayName: Build SSDT sqlproj
       inputs:
-        solution: '**\gold_tempo.sln'
-        vsVersion: '17.0'
+        solution: '**/*.sqlproj'
+        msbuildArchitecture: 'x64'
+        configuration: 'Debug'
 
     - task: CopyFiles@2
       displayName: 'Copy dacpac to artifacts'
       inputs:
-        SourceFolder: '$(Build.Repository.LocalPath)\gold_tempo\bin\Debug'
+        SourceFolder: '$(Build.SourcesDirectory)'
         Contents: '**/*.dacpac'
         TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
@@ -48,6 +58,7 @@ stages:
   dependsOn: Build
   jobs:
   - job: DeployDEV
+    displayName: DeployDEV
     steps:
     - download: current
       artifact: drop
@@ -56,12 +67,13 @@ stages:
       displayName: 'Deploy DACPAC to DEV (Windows Auth)'
       inputs:
         TaskType: 'dacpac'
-        DacpacFile: '$(Pipeline.Workspace)\drop\gold_tempo.dacpac'
+        # Use wildcard since dacpac location can vary based on project folder
+        DacpacFile: '$(Pipeline.Workspace)\drop\**\gold_tempo.dacpac'
         TargetMethod: 'server'
         ServerName: 'BLC-SVR-DW-DEV'
         DatabaseName: 'gold_tempo'
         AuthScheme: 'windowsAuthentication'
-        PublishProfile: '$(Build.Repository.LocalPath)\gold_tempo\gold_tempo.publish.xml'
+        PublishProfile: '$(Build.SourcesDirectory)\gold_tempo\gold_tempo.publish.xml'
 
 # =========================
 # FULL DATA COPY: DEV -> PROD
@@ -72,6 +84,7 @@ stages:
   dependsOn: Deploy_DEV
   jobs:
   - job: CopyDevToProd
+    displayName: CopyDevToProd
     steps:
     - powershell: |
         $devServer  = "BLC-SVR-DW-DEV"
