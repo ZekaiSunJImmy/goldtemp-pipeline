@@ -7,21 +7,22 @@ pool:
   name: Default
 
 variables:
-  # Full data copy target DB name
-  DEV_COPY_DB_NAME: 'gold_copy'
-  PROD_COPY_DB_NAME: 'gold_copy'
+  # Source DB (DEV) and destination DB (PROD)
+  DEV_SOURCE_DB_NAME: 'gold_tempo'
+  PROD_TARGET_DB_NAME: 'gold_copy'
 
-  # Source DB name (the DB you want to copy FROM)
-  SOURCE_DB_NAME: 'gold_tempo'
-
-  # IMPORTANT: this path is on the SQL Server machine (not the agent).
-  # The SQL Server service account must be able to write/read here.
-  SQL_BACKUP_FILE_DEV: 'C:\SqlBackups\gold_tempo_to_gold_copy_dev.bak'
-  SQL_BACKUP_FILE_PROD: 'C:\SqlBackups\gold_tempo_to_gold_copy_prod.bak'
+  # IMPORTANT:
+  # This path must be reachable by BOTH SQL Servers (DEV and PROD), because:
+  # 1) DEV will BACKUP to this path
+  # 2) PROD will RESTORE from this same path
+  #
+  # Best practice: a shared UNC path like \\fileserver\sqlbackups\...
+  # (SQL Server service accounts on both sides must have read/write permissions)
+  SHARED_BACKUP_FILE: '\\fileserver\sqlbackups\gold_tempo_dev_to_gold_copy_prod.bak'
 
 stages:
 # =========================
-# BUILD
+# BUILD (DACPAC)
 # =========================
 - stage: Build
   displayName: Build DACPAC
@@ -33,15 +34,11 @@ stages:
       persistCredentials: true
       clean: true
 
-    # Debug helper: confirm the sqlproj exists and show its path in logs
+    # Optional: confirm sqlproj exists (helps avoid "Solution not found" errors)
     - powershell: |
         Write-Host "Build.SourcesDirectory = $(Build.SourcesDirectory)"
         $projs = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter *.sqlproj
-        if (-not $projs) {
-          Write-Error "No .sqlproj found under $(Build.SourcesDirectory). Check repo/branch/path."
-          exit 1
-        }
-        "Found sqlproj files:"
+        if (-not $projs) { throw "No .sqlproj found under $(Build.SourcesDirectory)" }
         $projs | ForEach-Object { $_.FullName }
       displayName: "Find sqlproj"
 
@@ -67,7 +64,8 @@ stages:
         publishLocation: 'Container'
 
 # =========================
-# DEPLOY DEV (DACPAC)
+# DEPLOY DEV (optional)
+# Keep if you still want to deploy schema changes to DEV.
 # =========================
 - stage: Deploy_DEV
   displayName: Deploy to DEV
@@ -76,7 +74,6 @@ stages:
   - group: Dev-Group
   jobs:
   - job: DeployDEV
-    displayName: Deploy DEV
     steps:
     - download: current
       artifact: drop
@@ -94,62 +91,70 @@ stages:
         SqlPassword: '$(DEV_DB_PASSWORD)'
 
 # =========================
-# FULL DATA COPY DEV
-# gold_tempo -> gold_copy
+# COPY DEV -> PROD (FULL DATA COPY)
+# gold_tempo (DEV) -> gold_copy (PROD)
 # =========================
-- stage: Copy_DEV
-  displayName: Full data copy DEV (gold_tempo -> gold_copy)
-  dependsOn: Deploy_DEV
-  variables:
-  - group: Dev-Group
+- stage: Copy_DEV_to_PROD
+  displayName: Full copy DEV gold_tempo -> PROD gold_copy
+  dependsOn: Deploy_DEV   # change to "Build" if you want copy even when Deploy_DEV is removed
   jobs:
-  - job: CopyDEV
-    displayName: Backup/Restore DEV
+  - job: CopyDevToProd
+    displayName: Backup on DEV, Restore on PROD
     steps:
+    # --- BACKUP on DEV server ---
     - powershell: |
         $server = "$(DEV_SQL_SERVER)"
         $user   = "$(DEV_DB_USER)"
         $pass   = "$(DEV_DB_PASSWORD)"
 
-        $srcDb  = "$(SOURCE_DB_NAME)"
-        $dstDb  = "$(DEV_COPY_DB_NAME)"
-        $bak    = "$(SQL_BACKUP_FILE_DEV)"
+        $srcDb  = "$(DEV_SOURCE_DB_NAME)"
+        $bak    = "$(SHARED_BACKUP_FILE)"
 
         $tsql = @"
-        -- If destination exists, force single-user so we can restore over it
+        BACKUP DATABASE [$srcDb]
+          TO DISK = N'$bak'
+          WITH COPY_ONLY, INIT, COMPRESSION, STATS = 10;
+        "@
+
+        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 120 -d master
+      displayName: "DEV: Backup gold_tempo to shared .bak"
+
+    # --- RESTORE on PROD server into gold_copy ---
+    - powershell: |
+        $server = "$(PROD_SQL_SERVER)"
+        $user   = "$(PROD_DB_USER)"
+        $pass   = "$(PROD_DB_PASSWORD)"
+
+        $dstDb  = "$(PROD_TARGET_DB_NAME)"
+        $bak    = "$(SHARED_BACKUP_FILE)"
+
+        $tsql = @"
         IF DB_ID(N'$dstDb') IS NOT NULL
         BEGIN
           ALTER DATABASE [$dstDb] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
         END
 
-        -- Backup source database
-        BACKUP DATABASE [$srcDb]
-          TO DISK = N'$bak'
-          WITH COPY_ONLY, INIT, COMPRESSION, STATS = 10;
-
-        -- Restore into destination (schema + data)
         RESTORE DATABASE [$dstDb]
           FROM DISK = N'$bak'
           WITH REPLACE, RECOVERY, STATS = 10;
 
-        -- Back to multi-user
         ALTER DATABASE [$dstDb] SET MULTI_USER;
         "@
 
-        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 120 -d master
-      displayName: Full copy DEV (backup/restore)
+        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 300 -d master
+      displayName: "PROD: Restore shared .bak into gold_copy"
 
 # =========================
-# DEPLOY PROD (DACPAC)
+# (Optional) Deploy PROD schema after data copy
+# If you DON'T want DACPAC to touch PROD, remove this stage entirely.
 # =========================
 - stage: Deploy_PROD
   displayName: Deploy to PROD
-  dependsOn: Build
+  dependsOn: Copy_DEV_to_PROD
   variables:
   - group: Prod_Group
   jobs:
   - job: DeployPROD
-    displayName: Deploy PROD
     steps:
     - download: current
       artifact: drop
@@ -165,45 +170,3 @@ stages:
         AuthScheme: 'sqlServerAuthentication'
         SqlUsername: '$(PROD_DB_USER)'
         SqlPassword: '$(PROD_DB_PASSWORD)'
-
-# =========================
-# FULL DATA COPY PROD
-# gold_tempo -> gold_copy
-# =========================
-- stage: Copy_PROD
-  displayName: Full data copy PROD (gold_tempo -> gold_copy)
-  dependsOn: Deploy_PROD
-  variables:
-  - group: Prod_Group
-  jobs:
-  - job: CopyPROD
-    displayName: Backup/Restore PROD
-    steps:
-    - powershell: |
-        $server = "$(PROD_SQL_SERVER)"
-        $user   = "$(PROD_DB_USER)"
-        $pass   = "$(PROD_DB_PASSWORD)"
-
-        $srcDb  = "$(SOURCE_DB_NAME)"
-        $dstDb  = "$(PROD_COPY_DB_NAME)"
-        $bak    = "$(SQL_BACKUP_FILE_PROD)"
-
-        $tsql = @"
-        IF DB_ID(N'$dstDb') IS NOT NULL
-        BEGIN
-          ALTER DATABASE [$dstDb] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
-        END
-
-        BACKUP DATABASE [$srcDb]
-          TO DISK = N'$bak'
-          WITH COPY_ONLY, INIT, COMPRESSION, STATS = 10;
-
-        RESTORE DATABASE [$dstDb]
-          FROM DISK = N'$bak'
-          WITH REPLACE, RECOVERY, STATS = 10;
-
-        ALTER DATABASE [$dstDb] SET MULTI_USER;
-        "@
-
-        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 120 -d master
-      displayName: Full copy PROD (backup/restore)
