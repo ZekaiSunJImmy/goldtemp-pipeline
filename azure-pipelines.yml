@@ -6,12 +6,6 @@ pool:
 
 variables:
 - group: dbt_lina
-- name: DEV_SOURCE_DB
-  value: 'gold_tempo'
-- name: PROD_TARGET_DB
-  value: 'gold_copy'
-- name: SHARED_BACKUP_FILE
-  value: '\\BLC-FILE01\SqlBackups\gold_tempo_dev_to_gold_copy_prod.bak'
 
 stages:
 # =========================
@@ -25,16 +19,14 @@ stages:
     - checkout: self
       clean: true
 
-    # Build (keep VSBuild since your working example uses .sln)
     - task: VSBuild@1
       displayName: 'Visual Studio Build'
       inputs:
         solution: '**\gold_tempo.sln'
         vsVersion: '17.0'
 
-    # Publish the dacpac
     - task: CopyFiles@2
-      displayName: 'Copy into artifacts folder'
+      displayName: 'Copy dacpac to artifacts'
       inputs:
         SourceFolder: '$(Build.Repository.LocalPath)\gold_tempo\bin\Debug'
         Contents: '**/*.dacpac'
@@ -48,7 +40,7 @@ stages:
         publishLocation: 'Container'
 
 # =========================
-# DEPLOY DEV (gold_tempo)
+# DEPLOY DEV (Windows Auth)
 # =========================
 - stage: Deploy_DEV
   displayName: 'Deploy DEV gold_tempo'
@@ -60,21 +52,18 @@ stages:
       artifact: drop
 
     - task: SqlDacpacDeploymentOnMachineGroup@0
-      displayName: 'Deploy DACPAC to DEV gold_tempo'
+      displayName: 'Deploy DACPAC to DEV (Windows Auth)'
       inputs:
         TaskType: 'dacpac'
         DacpacFile: '$(Pipeline.Workspace)\drop\gold_tempo.dacpac'
         TargetMethod: 'server'
         ServerName: 'BLC-SVR-DW-DEV'
         DatabaseName: 'gold_tempo'
-        AuthScheme: 'sqlServerAuthentication'
-        SqlUsername: '$(sqluser)'
-        SqlPassword: '$(sqlpass)'
+        AuthScheme: 'windowsAuthentication'
         PublishProfile: '$(Build.Repository.LocalPath)\gold_tempo\gold_tempo.publish.xml'
 
 # =========================
-# FULL DATA COPY: DEV -> PROD
-# gold_tempo (DEV) -> gold_copy (PROD)
+# FULL DATA COPY DEV -> PROD
 # =========================
 - stage: Copy_DEV_to_PROD
   displayName: 'Full copy DEV gold_tempo -> PROD gold_copy'
@@ -82,32 +71,23 @@ stages:
   jobs:
   - job: CopyDevToProd
     steps:
-    # ---- BACKUP on DEV server (writes to shared path) ----
     - powershell: |
-        $server = "BLC-SVR-DW-DEV"
-        $user   = "$(sqluser)"
-        $pass   = "$(sqlpass)"
-        $srcDb  = "$(DEV_SOURCE_DB)"
-        $bak    = "$(SHARED_BACKUP_FILE)"
+        $devServer  = "BLC-SVR-DW-DEV"
+        $prodServer = "BLC-SVR-DW-PROD"
 
-        $tsql = @"
+        $srcDb = "gold_tempo"
+        $dstDb = "gold_copy"
+
+        # Shared path accessible by BOTH SQL Servers
+        $bak = "\\BLC-FILE01\SqlBackups\gold_tempo_dev_to_gold_copy_prod.bak"
+
+        $backupSql = @"
         BACKUP DATABASE [$srcDb]
           TO DISK = N'$bak'
           WITH COPY_ONLY, INIT, COMPRESSION, STATS = 10;
         "@
 
-        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 300 -d master
-      displayName: 'DEV: Backup gold_tempo to shared .bak'
-
-    # ---- RESTORE on PROD server into gold_copy (reads from shared path) ----
-    - powershell: |
-        $server = "BLC-SVR-DW-PROD"
-        $user   = "$(sqluser)"
-        $pass   = "$(sqlpass)"
-        $dstDb  = "$(PROD_TARGET_DB)"
-        $bak    = "$(SHARED_BACKUP_FILE)"
-
-        $tsql = @"
+        $restoreSql = @"
         IF DB_ID(N'$dstDb') IS NOT NULL
         BEGIN
           ALTER DATABASE [$dstDb] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
@@ -120,5 +100,7 @@ stages:
         ALTER DATABASE [$dstDb] SET MULTI_USER;
         "@
 
-        $tsql | sqlcmd -S $server -U $user -P $pass -b -l 600 -d master
-      displayName: 'PROD: Restore into gold_copy'
+        # Windows Authentication (agent runs as BALCAN\zsun)
+        $backupSql  | sqlcmd -S $devServer  -E -b -l 600 -d master
+        $restoreSql | sqlcmd -S $prodServer -E -b -l 1200 -d master
+      displayName: 'Backup on DEV, restore to PROD (Windows Auth)'
