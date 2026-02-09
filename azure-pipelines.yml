@@ -1,5 +1,6 @@
 trigger:
 - main
+- vscode
 
 pool:
   name: Default
@@ -9,10 +10,10 @@ variables:
 
 stages:
 # =========================
-# BUILD (build .sqlproj directly; no .sln needed)
+# BUILD
 # =========================
 - stage: Build
-  displayName: 'Build DACPAC (gold_tempo)'
+  displayName: 'Build DACPAC'
   jobs:
   - job: Build
     displayName: Build
@@ -20,17 +21,26 @@ stages:
     - checkout: self
       clean: true
 
-    # Helpful log: show what sqlproj files exist (so you can confirm paths)
+    # Show what is actually in the repo on the agent (helps avoid "not found")
     - powershell: |
         Write-Host "Build.SourcesDirectory = $(Build.SourcesDirectory)"
-        $projs = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter *.sqlproj
-        if (-not $projs) { throw "No .sqlproj found under $(Build.SourcesDirectory)" }
-        "Found sqlproj:"
-        $projs | ForEach-Object { $_.FullName }
-      displayName: "Find sqlproj"
+        Write-Host "Top-level items:"
+        Get-ChildItem -Path "$(Build.SourcesDirectory)" -Force | Format-Table Name
 
+        Write-Host "`nSearching for .sqlproj / .sln:"
+        $matches = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Force |
+          Where-Object { $_.Name -match '\.sqlproj$|\.sln$' }
+
+        if (-not $matches) {
+          throw "No .sqlproj or .sln found under $(Build.SourcesDirectory). Check branch/repo."
+        }
+
+        $matches | ForEach-Object { $_.FullName }
+      displayName: "List repo + find sqlproj/sln"
+
+    # Build any sqlproj found (works even if you don't have a .sln)
     - task: MSBuild@1
-      displayName: Build SSDT sqlproj
+      displayName: 'Build SSDT sqlproj'
       inputs:
         solution: '**/*.sqlproj'
         msbuildArchitecture: 'x64'
@@ -51,7 +61,7 @@ stages:
         publishLocation: 'Container'
 
 # =========================
-# DEPLOY DEV (Windows Auth: BALCAN\zsun via agent identity)
+# DEPLOY DEV
 # =========================
 - stage: Deploy_DEV
   displayName: 'Deploy DEV gold_tempo'
@@ -67,13 +77,11 @@ stages:
       displayName: 'Deploy DACPAC to DEV (Windows Auth)'
       inputs:
         TaskType: 'dacpac'
-        # Use wildcard since dacpac location can vary based on project folder
-        DacpacFile: '$(Pipeline.Workspace)\drop\**\gold_tempo.dacpac'
+        DacpacFile: '$(Pipeline.Workspace)\drop\**\*.dacpac'
         TargetMethod: 'server'
         ServerName: 'BLC-SVR-DW-DEV'
         DatabaseName: 'gold_tempo'
         AuthScheme: 'windowsAuthentication'
-        PublishProfile: '$(Build.SourcesDirectory)\gold_tempo\gold_tempo.publish.xml'
 
 # =========================
 # FULL DATA COPY: DEV -> PROD
@@ -88,7 +96,7 @@ stages:
     steps:
     - powershell: |
         $devServer  = "BLC-SVR-DW-DEV"
-        $prodServer = "BLC-SVR-DW-PROD"
+        $prodServer = "BLC-SVR-SQL01"
 
         $srcDb = "gold_tempo"
         $dstDb = "gold_copy"
@@ -116,6 +124,6 @@ stages:
         "@
 
         # Windows Authentication (agent runs as BALCAN\zsun) via -E
-        $backupSql  | sqlcmd -S $devServer  -E -b -l 600 -d master
+        $backupSql  | sqlcmd -S $devServer  -E -b -l 600  -d master
         $restoreSql | sqlcmd -S $prodServer -E -b -l 1200 -d master
       displayName: 'Backup on DEV, restore to PROD (Windows Auth)'
