@@ -4,8 +4,9 @@ trigger:
 pool:
   name: Default
 
+# Use the existing Library variable group that already has the right access
 variables:
-- group: dbt_lina
+- group: Prod_Group
 
 stages:
 # =========================
@@ -40,7 +41,7 @@ stages:
         publishLocation: 'Container'
 
 # =========================
-# DEPLOY DEV (Windows Auth)
+# DEPLOY DEV (Windows Auth: BALCAN\zsun via agent identity)
 # =========================
 - stage: Deploy_DEV
   displayName: 'Deploy DEV gold_tempo'
@@ -63,7 +64,8 @@ stages:
         PublishProfile: '$(Build.Repository.LocalPath)\gold_tempo\gold_tempo.publish.xml'
 
 # =========================
-# FULL DATA COPY DEV -> PROD
+# FULL DATA COPY: DEV -> PROD
+# DEV gold_tempo -> PROD gold_copy
 # =========================
 - stage: Copy_DEV_to_PROD
   displayName: 'Full copy DEV gold_tempo -> PROD gold_copy'
@@ -78,7 +80,7 @@ stages:
         $srcDb = "gold_tempo"
         $dstDb = "gold_copy"
 
-        # Shared path accessible by BOTH SQL Servers
+        # Shared UNC path accessible by BOTH SQL Servers
         $bak = "\\BLC-FILE01\SqlBackups\gold_tempo_dev_to_gold_copy_prod.bak"
 
         $backupSql = @"
@@ -100,7 +102,7 @@ stages:
         ALTER DATABASE [$dstDb] SET MULTI_USER;
         "@
 
-        # Windows Authentication (agent runs as BALCAN\zsun)
+        # Windows Authentication (agent runs as BALCAN\zsun) via -E
         $backupSql  | sqlcmd -S $devServer  -E -b -l 600 -d master
         $restoreSql | sqlcmd -S $prodServer -E -b -l 1200 -d master
       displayName: 'Backup on DEV, restore to PROD (Windows Auth)'
